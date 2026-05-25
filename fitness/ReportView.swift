@@ -61,6 +61,19 @@ class ReportViewModel: ObservableObject {
         let filename = "report_\(safeName.isEmpty ? "user" : safeName)_\(formatter.string(from: Date())).md"
         let url = docs.appendingPathComponent(filename)
         try markdown.write(to: url, atomically: true, encoding: .utf8)
+
+        #if targetEnvironment(simulator)
+        let macFolder = "/Users/BrokenMac/Documents/FitnessPlan"
+        let macURL = URL(fileURLWithPath: macFolder).appendingPathComponent(filename)
+        do {
+            try FileManager.default.createDirectory(atPath: macFolder, withIntermediateDirectories: true)
+            try markdown.write(to: macURL, atomically: true, encoding: .utf8)
+            print("🚀 Mirrored simulator report to Mac folder: \(macURL.path)")
+        } catch {
+            print("⚠️ Failed to mirror simulator report to Mac folder: \(error.localizedDescription)")
+        }
+        #endif
+
         savedReportURL = url
         return url
     }

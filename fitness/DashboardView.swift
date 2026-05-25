@@ -7,6 +7,8 @@ struct DashboardView: View {
     @EnvironmentObject var dashVM:    DashboardViewModel
     @EnvironmentObject var workoutVM: WorkoutViewModel
     @EnvironmentObject var reportVM:  ReportViewModel
+    @StateObject private var recommendationVM = RecommendationViewModel()
+    @State private var showRecommendationDetail = false
     @Binding var selectedTab: Int
 
     var snap: HealthSnapshot { dashVM.snapshot }
@@ -29,8 +31,9 @@ struct DashboardView: View {
                     progressRing
                     metricsRow
                     if let day = todayWorkout { todayWorkoutCard(day) }
+                    localRecommendationSection
                     reportActionsSection       // live to-dos from .md
-                    recommendationCard
+                    reportCard
                     quickStatsRow
                     Spacer(minLength: 30)
                 }
@@ -38,7 +41,24 @@ struct DashboardView: View {
             }
             .refreshable { dashVM.refresh() }
         }
-        .onAppear { dashVM.authorize() }
+        .sheet(isPresented: $showRecommendationDetail) {
+            if let plan = recommendationVM.plan {
+                WorkoutRecommendationDetailView(plan: plan) {
+                    recommendationVM.markCompleted()
+                    showRecommendationDetail = false
+                }
+            }
+        }
+        .onAppear {
+            dashVM.authorize()
+            recommendationVM.refresh(snapshot: snap)
+        }
+        .onChange(of: snap.calories) { _ in
+            recommendationVM.refresh(snapshot: snap)
+        }
+        .onChange(of: snap.calGoal) { _ in
+            recommendationVM.refresh(snapshot: snap)
+        }
         // Sync goals whenever a new report is loaded
         .onChange(of: reportVM.report?.id) { _ in
             if let r = reportVM.report {
@@ -231,9 +251,104 @@ struct DashboardView: View {
         }
     }
 
-    // MARK: Recommendation card
-    var recommendationCard: some View {
-        Button { selectedTab = 3 } label: {
+    // MARK: Local recommendation engine
+    var localRecommendationSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label("Workout Recommendation", systemImage: "wand.and.stars")
+                    .font(.headline).foregroundColor(.white)
+                Spacer()
+                if recommendationVM.isLoading {
+                    ProgressView().tint(.accent)
+                }
+            }
+            .padding(.horizontal)
+
+            recommendationControls
+
+            Button { showRecommendationDetail = recommendationVM.plan != nil } label: {
+                HStack(spacing: 14) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12)
+                            .fill(Color.teal.opacity(0.18))
+                            .frame(width: 48, height: 48)
+                        Image(systemName: "figure.run.circle.fill")
+                            .font(.title2).foregroundColor(.teal)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(recommendationVM.plan?.title ?? "Preparing local plan")
+                            .font(.subheadline.bold()).foregroundColor(.white)
+                        if let plan = recommendationVM.plan {
+                            Text("\(plan.durationMinutes)m · \(Int(plan.estimatedCalories)) kcal · \(plan.sourceProvider)")
+                                .font(.caption).foregroundColor(.secondary)
+                                .lineLimit(1).minimumScaleFactor(0.8)
+                        } else {
+                            Text("Uses today's active energy and local safety rules")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(16).background(Color.card).cornerRadius(16).padding(.horizontal)
+            }
+            .disabled(recommendationVM.plan == nil)
+        }
+    }
+
+    var recommendationControls: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 8) {
+                ForEach(WorkoutIntensity.allCases) { intensity in
+                    Button {
+                        recommendationVM.preferredIntensity = intensity
+                        recommendationVM.refresh(snapshot: snap)
+                    } label: {
+                        Text(intensity.rawValue)
+                            .font(.caption.bold())
+                            .foregroundColor(recommendationVM.preferredIntensity == intensity ? .white : .secondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .background(recommendationVM.preferredIntensity == intensity ? Color.accent : Color.bg)
+                            .cornerRadius(8)
+                    }
+                }
+            }
+
+            HStack {
+                Label("Time", systemImage: "timer")
+                    .font(.caption).foregroundColor(.secondary)
+                Spacer()
+                Stepper("\(recommendationVM.availableMinutes) min", value: $recommendationVM.availableMinutes, in: 10...120, step: 5)
+                    .labelsHidden()
+                    .onChange(of: recommendationVM.availableMinutes) { _ in
+                        recommendationVM.refresh(snapshot: snap)
+                    }
+                Text("\(recommendationVM.availableMinutes)m")
+                    .font(.caption.bold()).foregroundColor(.white)
+                    .frame(width: 40, alignment: .trailing)
+            }
+
+            Picker("Equipment", selection: $recommendationVM.availableEquipment) {
+                Text("No equipment").tag("Bodyweight / No equipment")
+                Text("Dumbbells").tag("Dumbbells & Bench only")
+                Text("Full gym").tag("Full Gym (barbells, machines, cables)")
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: recommendationVM.availableEquipment) { _ in
+                recommendationVM.refresh(snapshot: snap)
+            }
+        }
+        .padding(12)
+        .background(Color.card)
+        .cornerRadius(14)
+        .padding(.horizontal)
+    }
+
+    // MARK: Report card
+    var reportCard: some View {
+        Button { selectedTab = 4 } label: {
             HStack(spacing: 16) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 12)
@@ -354,5 +469,124 @@ struct QuickStat: View {
         }
         .frame(maxWidth: .infinity).padding(14)
         .background(Color.card).cornerRadius(14)
+    }
+}
+
+struct WorkoutRecommendationDetailView: View {
+    let plan: WorkoutPlan
+    let onComplete: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var trackingBlock: ExerciseBlock?
+    @State private var completedBlocks: Set<UUID> = []
+
+    var body: some View {
+        ZStack {
+            Color.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plan.title)
+                                .font(.title2.bold()).foregroundColor(.white)
+                            Text("\(plan.durationMinutes) min · \(Int(plan.estimatedCalories)) kcal · \(plan.intensity.rawValue)")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button { dismiss() } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.title2).foregroundColor(.secondary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Plan Blocks", systemImage: "list.bullet.rectangle")
+                            .font(.headline).foregroundColor(.white)
+                        ForEach(plan.exercises) { block in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack {
+                                    Text(block.name).font(.subheadline.bold()).foregroundColor(.white)
+                                    Spacer()
+                                    Text("\(block.durationMinutes)m")
+                                        .font(.caption.bold()).foregroundColor(.accent)
+                                }
+                                Text("\(Int(block.estimatedCalories)) kcal · \(block.equipment)")
+                                    .font(.caption).foregroundColor(.secondary)
+                                Text(block.instructions)
+                                    .font(.caption).foregroundColor(.white)
+                                Text(block.safetyCue)
+                                    .font(.caption2).foregroundColor(.amber)
+                                
+                                HStack {
+                                    if TrackableExercise.from(name: block.name) != nil, !completedBlocks.contains(block.id) {
+                                        Button {
+                                            trackingBlock = block
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "camera.fill")
+                                                Text("Track")
+                                            }
+                                            .font(.caption2.bold())
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                LinearGradient(colors: [.accent, .teal],
+                                                    startPoint: .leading, endPoint: .trailing)
+                                            )
+                                            .cornerRadius(8)
+                                        }
+                                    }
+                                    Spacer()
+                                    if completedBlocks.contains(block.id) {
+                                        Image(systemName: "checkmark.circle.fill").foregroundColor(.teal)
+                                    }
+                                }
+                                .padding(.top, 4)
+                            }
+                            .padding(12).background(Color.card).cornerRadius(12)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label("Safety Notes", systemImage: "checkmark.shield.fill")
+                            .font(.headline).foregroundColor(.white)
+                        ForEach(plan.safetyNotes, id: \.self) { note in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.caption).foregroundColor(.teal)
+                                    .padding(.top, 2)
+                                Text(note).font(.caption).foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(14).background(Color.card).cornerRadius(14)
+
+                    Text("Source: \(plan.sourceProvider)")
+                        .font(.caption2).foregroundColor(.secondary)
+
+                    Button(action: onComplete) {
+                        Label("Mark Recommendation Complete", systemImage: "checkmark.circle.fill")
+                            .font(.headline).foregroundColor(.white)
+                            .frame(maxWidth: .infinity).padding(14)
+                            .background(Color.teal).cornerRadius(14)
+                    }
+                }
+                .padding()
+            }
+        }
+        .preferredColorScheme(.dark)
+        .fullScreenCover(item: $trackingBlock) { block in
+            if let trackable = TrackableExercise.from(name: block.name) {
+                // For recommendations, we default to 1 set of 10 if not specified, or base it on duration
+                let estimatedReps = max(10, block.durationMinutes * 5)
+                ExerciseTrackingView(
+                    exercise: trackable,
+                    targetReps: estimatedReps,
+                    targetSets: 1
+                ) { _ in
+                    completedBlocks.insert(block.id)
+                }
+            }
+        }
     }
 }

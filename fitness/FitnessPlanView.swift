@@ -105,6 +105,7 @@ struct WorkoutDetailSheet: View {
     let day: WorkoutDay
     @EnvironmentObject var workoutVM: WorkoutViewModel
     @Environment(\.dismiss) var dismiss
+    @State private var trackingExercise: Exercise?
     var liveDay: WorkoutDay? { workoutVM.activePlan.days.first { $0.id == day.id } }
 
     var body: some View {
@@ -140,6 +141,28 @@ struct WorkoutDetailSheet: View {
                                             .font(.caption).foregroundColor(.secondary)
                                     }
                                     Spacer()
+
+                                    // Camera tracking button
+                                    if ex.isTrackable && !ex.isCompleted {
+                                        Button {
+                                            trackingExercise = ex
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "camera.fill")
+                                                Text("Track")
+                                            }
+                                            .font(.caption2.bold())
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(
+                                                LinearGradient(colors: [.accent, .teal],
+                                                    startPoint: .leading, endPoint: .trailing)
+                                            )
+                                            .cornerRadius(8)
+                                        }
+                                    }
+
                                     Button { workoutVM.toggleExercise(dayId: day.id, exId: ex.id) } label: {
                                         Image(systemName: ex.isCompleted ? "checkmark.circle.fill" : "circle")
                                             .foregroundColor(ex.isCompleted ? .teal : .secondary)
@@ -162,6 +185,20 @@ struct WorkoutDetailSheet: View {
                     }.padding()
                 }
             }
-        }.preferredColorScheme(.dark)
+        }
+        .preferredColorScheme(.dark)
+        .fullScreenCover(item: $trackingExercise) { ex in
+            if let trackable = ex.trackableExercise {
+                ExerciseTrackingView(
+                    exercise: trackable,
+                    targetReps: ex.reps,
+                    targetSets: ex.sets
+                ) { _ in
+                    // Mark exercise as completed after tracking
+                    workoutVM.toggleExercise(dayId: day.id, exId: ex.id)
+                }
+            }
+        }
     }
 }
+

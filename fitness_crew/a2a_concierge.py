@@ -101,7 +101,7 @@ async def send_a2a_task(agent_name: str, task_text: str) -> str:
     )
 
     response: SendMessageResponse = await client.send_message(
-        message_request=request
+        request=request
     )
 
     # Extract text from response
@@ -172,7 +172,7 @@ async def lifespan(app: FastAPI):
     yield
     # Cleanup: close httpx clients
     for client in agent_clients.values():
-        await client._httpx_client.aclose()
+        await client.httpx_client.aclose()
 
 
 app = FastAPI(

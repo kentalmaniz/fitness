@@ -27,6 +27,14 @@ enum Goal: String, CaseIterable, Codable {
 struct Exercise: Identifiable, Codable {
     var id = UUID(); var name: String; var sets: Int; var reps: Int
     var icon: String; var isCompleted: Bool = false
+
+    /// Returns the trackable exercise type if camera tracking is supported for this exercise.
+    var trackableExercise: TrackableExercise? {
+        TrackableExercise.from(name: name)
+    }
+
+    /// True when this exercise can be tracked via the camera pose detector.
+    var isTrackable: Bool { trackableExercise != nil }
 }
 struct WorkoutDay: Identifiable, Codable {
     var id = UUID(); var name: String; var focus: String

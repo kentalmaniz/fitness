@@ -290,9 +290,21 @@ def main():
     print(report)
     line("═")
 
+    import os
     filename = f"report_{safe_name}_{date_str}.md"
     with open(filename, "w") as f:
         f.write(report)
+
+    # Mirror to central FitnessPlan folder
+    central_dir = "/Users/BrokenMac/Documents/FitnessPlan"
+    try:
+        os.makedirs(central_dir, exist_ok=True)
+        central_path = os.path.join(central_dir, filename)
+        with open(central_path, "w") as f:
+            f.write(report)
+        print(f"  🚀 Mirrored report to central folder: {central_path}")
+    except Exception as e:
+        pass
 
     print(f"\n  💾 Saved → {filename}")
     print("  Open in VS Code / any Markdown viewer for full formatting.\n")
