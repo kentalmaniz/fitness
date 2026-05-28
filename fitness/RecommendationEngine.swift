@@ -14,6 +14,24 @@ enum WorkoutIntensity: String, CaseIterable, Codable, Identifiable {
         case .high: return ["hiit", "running", "interval", "jump rope"]
         }
     }
+
+    /// Maps intensity to API Ninjas exercise type for smarter queries.
+    var apiExerciseType: String? {
+        switch self {
+        case .low: return "stretching"
+        case .moderate: return "strength"
+        case .high: return "plyometrics"
+        }
+    }
+
+    /// Maps intensity to API Ninjas difficulty param.
+    var apiDifficulty: String {
+        switch self {
+        case .low: return "beginner"
+        case .moderate: return "intermediate"
+        case .high: return "expert"
+        }
+    }
 }
 
 struct WorkoutSessionSummary: Codable, Equatable {
@@ -72,6 +90,8 @@ struct ExerciseTemplate: Identifiable, Codable, Equatable {
     var safetyCue: String
     var isLowImpact: Bool
     var sourceProvider: String
+    var muscle: String = ""
+    var exerciseType: String = ""
     var fetchedAt: Date = Date()
 }
 
@@ -178,46 +198,160 @@ struct MockExerciseCatalogProvider: ExerciseCatalogProviding {
     ]
 }
 
-struct APINinjasExerciseCatalogProvider: ExerciseCatalogProviding {
-    var apiKey: String
+// MARK: - Wger API response model
+struct WgerResponse: Decodable {
+    let results: [WgerExercise]
+}
+
+struct WgerExercise: Decodable, Identifiable, Equatable {
+    static func == (lhs: WgerExercise, rhs: WgerExercise) -> Bool {
+        lhs.id == rhs.id
+    }
+    
+    let id: Int
+    let category: WgerNamedItem?
+    let muscles: [WgerNamedItem]?
+    let equipment: [WgerNamedItem]?
+    let translations: [WgerTranslation]?
+    let images: [WgerImage]?
+    
+    var englishTranslation: WgerTranslation? {
+        translations?.first(where: { $0.language == 2 })
+    }
+    
+    // Wger places the English name/desc in translations array. Prefer language == 2 (English).
+    var name: String { englishTranslation?.name ?? translations?.first?.name ?? "Unknown Exercise" }
+    
+    var descriptionStr: String {
+        let desc = englishTranslation?.description_source ?? englishTranslation?.description ?? "Keep the movement controlled and repeat with good form."
+        return desc.strippingHTML()
+    }
+    
+    var imageUrl: URL? {
+        guard let urlString = images?.first?.image else { return nil }
+        return URL(string: urlString)
+    }
+    
+    var equipmentDisplay: String {
+        guard let eq = equipment, !eq.isEmpty else { return "No equipment" }
+        return eq.map { $0.name }.joined(separator: ", ")
+    }
+    
+    func toTemplate(fallbackEquipment: String = "Bodyweight / No equipment",
+                    fallbackIntensity: WorkoutIntensity = .moderate) -> ExerciseTemplate {
+        return ExerciseTemplate(
+            name: name,
+            metValue: fallbackIntensity.defaultMET,
+            intensity: fallbackIntensity,
+            equipment: equipmentDisplay == "none (bodyweight exercise)" ? fallbackEquipment : equipmentDisplay,
+            instructions: descriptionStr,
+            safetyCue: "Scale range, speed, or load before form breaks.",
+            isLowImpact: category?.name.localizedCaseInsensitiveContains("stretching") == true || fallbackIntensity == .low,
+            sourceProvider: "Wger API",
+            muscle: muscles?.map { $0.name }.joined(separator: ", ") ?? "",
+            exerciseType: category?.name ?? ""
+        )
+    }
+}
+
+struct WgerNamedItem: Decodable {
+    let id: Int
+    let name: String
+}
+
+struct WgerTranslation: Decodable {
+    let language: Int?
+    let name: String?
+    let description: String?
+    let description_source: String?
+}
+
+struct WgerImage: Decodable {
+    let image: String?
+}
+
+extension String {
+    func strippingHTML() -> String {
+        return self.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression, range: nil)
+    }
+}
+
+// MARK: - Wger API Service
+struct WgerService {
+    var session: URLSession = .shared
+
+    /// Map user equipment selection to Wger equipment ID.
+    static func mapEquipment(_ userEquipment: String) -> Int? {
+        let lower = userEquipment.lowercased()
+        if lower.contains("dumbbell")  { return 3 }
+        if lower.contains("band")      { return 8 }
+        if lower.contains("barbell")   { return 1 }
+        if lower.contains("bodyweight") || lower.contains("no equipment") { return 7 }
+        return nil
+    }
+
+    /// Search exercises by category, equipment, or name filtering locally
+    func searchExercises(
+        name: String? = nil,
+        category: Int? = nil,
+        equipment: Int? = nil
+    ) async throws -> [WgerExercise] {
+        guard var components = URLComponents(string: "https://wger.de/api/v2/exerciseinfo/") else {
+            return []
+        }
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "language", value: "2"), // English
+            URLQueryItem(name: "limit", value: "100") // Batch size
+        ]
+        
+        if let category { queryItems.append(URLQueryItem(name: "category", value: String(category))) }
+        if let equipment { queryItems.append(URLQueryItem(name: "equipment", value: String(equipment))) }
+        
+        components.queryItems = queryItems
+
+        guard let url = components.url else { return [] }
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.timeoutInterval = 15
+
+        let (data, response) = try await session.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        
+        let wgerResponse = try JSONDecoder().decode(WgerResponse.self, from: data)
+        var results = wgerResponse.results
+        
+        // Filter out exercises that don't have an English translation
+        results = results.filter { $0.englishTranslation != nil }
+        
+        if let name = name, !name.isEmpty {
+            results = results.filter { $0.name.localizedCaseInsensitiveContains(name) }
+        }
+        
+        return results
+    }
+
+    func lookupExercise(name: String) async throws -> WgerExercise? {
+        let results = try await searchExercises(name: name)
+        return results.first { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }
+            ?? results.first
+    }
+}
+
+struct WgerExerciseCatalogProvider: ExerciseCatalogProviding {
     var session: URLSession = .shared
 
     func fetchTemplates(for input: RecommendationInput) async throws -> [ExerciseTemplate] {
-        let query = input.preferredIntensity.searchTerms.first ?? "cardio"
-        guard var components = URLComponents(string: "https://api.api-ninjas.com/v1/exercises") else {
-            return []
+        let service = WgerService(session: session)
+        let equipmentID = WgerService.mapEquipment(input.availableEquipment)
+
+        let results = try await service.searchExercises(equipment: equipmentID)
+        return results.shuffled().prefix(20).map { 
+            $0.toTemplate(fallbackEquipment: input.availableEquipment,
+                          fallbackIntensity: input.preferredIntensity)
         }
-        components.queryItems = [URLQueryItem(name: "name", value: query)]
-        guard let url = components.url else { return [] }
-
-        var request = URLRequest(url: url)
-        request.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
-        request.timeoutInterval = 8
-
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { return [] }
-        let decoded = try JSONDecoder().decode([APIExercise].self, from: data)
-        return decoded.map { item in
-            let intensity = WorkoutIntensity(fromDifficulty: item.difficulty) ?? input.preferredIntensity
-            return ExerciseTemplate(
-                name: item.name.capitalized,
-                metValue: intensity.defaultMET,
-                intensity: intensity,
-                equipment: item.equipment?.isEmpty == false ? item.equipment!.capitalized : input.availableEquipment,
-                instructions: item.instructions?.isEmpty == false ? item.instructions! : "Keep the movement controlled and repeat with good form.",
-                safetyCue: "Scale range, speed, or load before form breaks.",
-                isLowImpact: item.type?.localizedCaseInsensitiveContains("stretching") == true || intensity == .low,
-                sourceProvider: "API Ninjas"
-            )
-        }
-    }
-
-    private struct APIExercise: Decodable {
-        let name: String
-        let type: String?
-        let difficulty: String?
-        let equipment: String?
-        let instructions: String?
     }
 }
 

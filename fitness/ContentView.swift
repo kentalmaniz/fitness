@@ -20,13 +20,17 @@ struct ContentView: View {
                 .tabItem { Label("Get Plan", systemImage: "sparkles") }
                 .tag(2)
 
+            ExerciseLibraryView()
+                .tabItem { Label("Library", systemImage: "books.vertical.fill") }
+                .tag(3)
+
             HealthStatsView()
                 .tabItem { Label("Stats", systemImage: "chart.bar.fill") }
-                .tag(3)
+                .tag(4)
 
             ReportView()
                 .tabItem { Label("AI Report", systemImage: "doc.text.fill") }
-                .tag(4)
+                .tag(5)
         }
         .accentColor(.accent)
         .onAppear {

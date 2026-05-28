@@ -258,6 +258,9 @@ struct DashboardView: View {
                 Label("Workout Recommendation", systemImage: "wand.and.stars")
                     .font(.headline).foregroundColor(.white)
                 Spacer()
+
+
+
                 if recommendationVM.isLoading {
                     ProgressView().tint(.accent)
                 }
@@ -425,6 +428,7 @@ struct DashboardView: View {
         let h = Calendar.current.component(.hour, from: Date())
         return h < 12 ? "morning ☀️" : h < 17 ? "afternoon ⚡" : "evening 🌙"
     }
+
 }
 
 // MARK: - Goal Metric Card
@@ -478,6 +482,7 @@ struct WorkoutRecommendationDetailView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var trackingBlock: ExerciseBlock?
     @State private var completedBlocks: Set<UUID> = []
+    @State private var tutorialExerciseName: String? = nil
 
     var body: some View {
         ZStack {
@@ -516,7 +521,25 @@ struct WorkoutRecommendationDetailView: View {
                                 Text(block.safetyCue)
                                     .font(.caption2).foregroundColor(.amber)
                                 
-                                HStack {
+                                HStack(spacing: 8) {
+                                    // Tutorial button
+                                    if block.name != "Warm-Up" && block.name != "Cooldown" {
+                                        Button {
+                                            tutorialExerciseName = block.name
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "book.fill")
+                                                Text("Tutorial")
+                                            }
+                                            .font(.caption2.bold())
+                                            .foregroundColor(.accent)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(Color.accent.opacity(0.15))
+                                            .cornerRadius(8)
+                                        }
+                                    }
+
                                     if TrackableExercise.from(name: block.name) != nil, !completedBlocks.contains(block.id) {
                                         Button {
                                             trackingBlock = block
@@ -575,6 +598,12 @@ struct WorkoutRecommendationDetailView: View {
             }
         }
         .preferredColorScheme(.dark)
+        .sheet(item: Binding(
+            get: { tutorialExerciseName.map { TutorialItem(name: $0) } },
+            set: { tutorialExerciseName = $0?.name }
+        )) { item in
+            ExerciseTutorialView(exerciseName: item.name)
+        }
         .fullScreenCover(item: $trackingBlock) { block in
             if let trackable = TrackableExercise.from(name: block.name) {
                 // For recommendations, we default to 1 set of 10 if not specified, or base it on duration
@@ -589,4 +618,10 @@ struct WorkoutRecommendationDetailView: View {
             }
         }
     }
+}
+
+/// Identifiable wrapper for presenting tutorial sheets.
+struct TutorialItem: Identifiable {
+    let name: String
+    var id: String { name }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 
 @MainActor
 final class RecommendationViewModel: ObservableObject {
@@ -15,31 +16,38 @@ final class RecommendationViewModel: ObservableObject {
     private let store: RecommendationStoring
 
     init(
-        engine: WorkoutRecommendationEngine = RecommendationViewModel.defaultEngine(),
         store: RecommendationStoring = FileRecommendationStore()
     ) {
-        self.engine = engine
         self.store = store
+        self.engine = Self.buildEngine()
         let cache = store.loadCache()
         self.recentSessions = Array(cache.completedSessions.prefix(5))
         self.plan = cache.recommendations.first
     }
 
+    /// Call to force engine rebuild (e.g. if provider needs refresh, though Wger doesn't usually need it)
+    func rebuildEngine() {
+        engine = Self.buildEngine()
+    }
+
+
+
     func refresh(snapshot: HealthSnapshot) {
         isLoading = true
         targetCalories = snapshot.calGoal
-        let input = RecommendationInput(
-            targetCalories: targetCalories,
-            availableMinutes: availableMinutes,
-            preferredIntensity: preferredIntensity,
-            activeEnergyBurned: snapshot.calories,
-            bodyWeightPounds: bodyWeightPounds,
-            recentSessions: recentSessions,
-            availableEquipment: availableEquipment,
-            healthKitAvailable: snapshot.connectionStatus == .connected
-        )
-
+        
         Task {
+            let input = RecommendationInput(
+                targetCalories: targetCalories,
+                availableMinutes: availableMinutes,
+                preferredIntensity: preferredIntensity,
+                activeEnergyBurned: snapshot.calories,
+                bodyWeightPounds: bodyWeightPounds,
+                recentSessions: recentSessions,
+                availableEquipment: availableEquipment,
+                healthKitAvailable: snapshot.connectionStatus == .connected
+            )
+
             let nextPlan = await engine.recommend(input: input)
             await MainActor.run {
                 plan = nextPlan
@@ -72,12 +80,11 @@ final class RecommendationViewModel: ObservableObject {
         store.saveRecommendation(plan, target: target)
     }
 
-    nonisolated private static func defaultEngine() -> WorkoutRecommendationEngine {
-        let key = ProcessInfo.processInfo.environment["API_NINJAS_KEY"]
-        let remote = key.map { APINinjasExerciseCatalogProvider(apiKey: $0) }
+    nonisolated private static func buildEngine() -> WorkoutRecommendationEngine {
         return WorkoutRecommendationEngine(
-            catalog: HybridExerciseCatalogProvider(remote: remote),
+            catalog: HybridExerciseCatalogProvider(remote: WgerExerciseCatalogProvider()),
             estimator: METCalorieEstimator()
         )
     }
 }
+
